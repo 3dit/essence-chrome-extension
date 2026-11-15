@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Essence Extractor",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Extract content 'Essence' from the current page.",
   "action": {
     "default_title": "Run Essence"
