@@ -9,10 +9,12 @@
   // If a later scan finds LESS content (paywall truncation, lazy unloading,
   // overlays hiding paragraphs, etc.) the earlier, larger snapshot is kept.
 
-  const MIN_SCAN_GAP_MS = 1000;   // at most one scan per second
+  const MIN_SCAN_GAP_MS = 1000;   // at most one scan per second...
+  const MAX_SCAN_GAP_MS = 8000;   // ...slowing to one per 8s when nothing changes
   const BACKSTOP_SCAN_MS = 2000;  // periodic scan in case no mutations fire
 
-  let best = null;       // { url, title, paragraphs: [html], textLength }
+  let best = null;       // { url, title, items: [{ type: 'p'|'h'|'li', html }], textLength }
+  let scanGap = MIN_SCAN_GAP_MS;
   let applied = false;
   let lastScan = 0;
   let pendingScan = null;
@@ -63,75 +65,178 @@
 
   // ---------- content detection ----------
 
+  const norm = (s) => (s || '').replace(/\s+/g, ' ').trim();
+
   function isVisible(el) {
     const style = window.getComputedStyle(el);
     return style && style.display !== 'none' && style.visibility !== 'hidden' && el.offsetHeight > 0;
   }
 
-  // Per-scan cache so each <p> is measured once, not once per ancestor div.
-  function makeParagraphInfo() {
-    const cache = new Map();
-    return (p) => {
-      let info = cache.get(p);
-      if (!info) {
-        const visible = isVisible(p);
-        info = { visible, text: visible ? p.innerText.trim() : '' };
-        cache.set(p, info);
-      }
-      return info;
-    };
+  // Parts of a page that are never article text, whatever they contain.
+  const BOILERPLATE_TAGS = new Set(['NAV', 'FOOTER', 'ASIDE', 'FIGURE', 'FIGCAPTION', 'FORM', 'BUTTON', 'DIALOG']);
+  const BOILERPLATE_ROLES = /^(navigation|complementary|contentinfo|dialog|alertdialog|search)$/;
+  // Class/id words that usually mean "not the article" (matched as whole
+  // words, e.g. "related-links" but not "unrelated").
+  const BOILERPLATE_NAMES = /(^|[^a-z])(comments?|related|newsletters?|promo|promos|footer|recirc|recirculation|share|sharing|social|sidebar|subscribe|signup|copyright|outbrain|taboola|trending|popular|recommended|recommendations|cookie|cookies|consent|sponsor|sponsored|byline|author-bio|bio|caption|credits?|disclaimer|tags|breadcrumbs?)([^a-z]|$)/i;
+
+  // Text that marks a short paragraph as site chrome rather than article text.
+  const JUNK_TEXT = /cookie|advert|subscribe|sign up|signing up|log ?in\b|newsletter|all rights reserved|©|copyright|your email address|privacy policy|terms of (use|service)|required fields/i;
+  const JUNK_HEADING = /related|recommended|more (stories|from|on|in)\b|read (more|next)|subscribe|newsletter|trending|most (read|popular)|share|comments?|advertis|sign up|follow us|topics|^watch\b|^listen\b|^see also|^latest/i;
+  const ENDS_LIKE_SENTENCE = /[.?!:"”’…)]$/;
+
+  // Share of an element's text that sits inside links.
+  function linkRatio(el, textLength) {
+    if (!textLength) return 0;
+    let linked = 0;
+    for (const a of el.querySelectorAll('a')) linked += norm(a.textContent).length;
+    return linked / textLength;
   }
 
-  function getTextDensityScore(el, pInfo) {
-    const ps = el.querySelectorAll('p');
-    if (ps.length === 0) return 0;
-
-    let textLength = 0;
-    let visibleCount = 0;
-
-    ps.forEach(p => {
-      const { visible, text } = pInfo(p);
-      if (visible && text.length > 30) {
-        textLength += text.length;
-        visibleCount++;
-      }
-    });
-
-    return (textLength / (el.innerText.length + 1)) * visibleCount;
+  // Keep only <a> tags from an element's HTML.
+  function cleanHtml(el) {
+    return el.innerHTML.trim().replace(/<(?!\/?a(?=>|\s.*>))\/?.*?>/gi, '');
   }
 
-  function findBestContentContainer(pInfo) {
-    let bestEl = null;
-    let bestScore = 0;
+  // Looks at every paragraph once and works out, for each element on the page,
+  // how much article-like text it holds. Returns the best container and a
+  // function saying whether an element sits in a boilerplate region.
+  function analysePage() {
+    const body = document.body;
+    const info = new Map();          // p -> { visible, text }
+    const rawLen = new Map();        // element -> text length of all visible paragraphs inside
+    let total = 0;
 
-    for (const div of document.querySelectorAll('div')) {
-      if (div.querySelectorAll('p').length < 3) continue;
-      if (!isVisible(div)) continue;
-
-      const score = getTextDensityScore(div, pInfo);
-      if (score > bestScore) {
-        bestScore = score;
-        bestEl = div;
+    const ps = body.querySelectorAll('p');
+    for (const p of ps) {
+      const visible = isVisible(p);
+      const text = visible ? norm(p.innerText) : '';
+      info.set(p, { visible, text });
+      if (text.length > 30) {
+        total += text.length;
+        for (let e = p.parentElement; e && e !== body; e = e.parentElement) {
+          rawLen.set(e, (rawLen.get(e) || 0) + text.length);
+        }
       }
     }
-    return bestEl;
+
+    // An element is boilerplate by tag/role, or by name unless it holds a
+    // large share of the page's text (e.g. an article wrapper that happens
+    // to be called "article-with-sidebar").
+    const boilerCache = new Map();
+    const isBoilerplateEl = (e) => {
+      let v = boilerCache.get(e);
+      if (v === undefined) {
+        const role = e.getAttribute('role') || '';
+        const name = (typeof e.className === 'string' ? e.className : '') + ' ' + e.id;
+        v = BOILERPLATE_TAGS.has(e.tagName) || BOILERPLATE_ROLES.test(role) ||
+          (BOILERPLATE_NAMES.test(name) && (rawLen.get(e) || 0) < total * 0.4);
+        boilerCache.set(e, v);
+      }
+      return v;
+    };
+    const inBoilerplate = (el) => {
+      for (let e = el.parentElement; e && e !== body; e = e.parentElement) {
+        if (isBoilerplateEl(e)) return true;
+      }
+      return false;
+    };
+
+    // Score containers by the article-like paragraphs they hold.
+    const goodLen = new Map();
+    const goodCount = new Map();
+    for (const p of ps) {
+      const { text } = info.get(p);
+      if (text.length <= 30 || inBoilerplate(p)) continue;
+      for (let e = p.parentElement; e && e !== body; e = e.parentElement) {
+        goodLen.set(e, (goodLen.get(e) || 0) + text.length);
+        goodCount.set(e, (goodCount.get(e) || 0) + 1);
+      }
+    }
+
+    const CONTAINER_TAGS = new Set(['DIV', 'ARTICLE', 'SECTION', 'MAIN']);
+    const candidates = [];
+    for (const [el, count] of goodCount) {
+      if (count < 3 || !CONTAINER_TAGS.has(el.tagName)) continue;
+      // Cheap first estimate (textContent needs no layout).
+      const rough = (goodLen.get(el) / (el.textContent.length + 1)) * count;
+      candidates.push({ el, count, rough });
+    }
+    candidates.sort((a, b) => b.rough - a.rough);
+
+    // Exact score (visible text only) for the front-runners.
+    let bestEl = null;
+    let bestScore = 0;
+    for (const c of candidates.slice(0, 8)) {
+      if (!isVisible(c.el)) continue;
+      const score = (goodLen.get(c.el) / (c.el.innerText.length + 1)) * c.count;
+      if (score > bestScore) {
+        bestScore = score;
+        bestEl = c.el;
+      }
+    }
+
+    return { container: bestEl, info, inBoilerplate };
   }
 
-  function extractCleanParagraphsWithLinks(container, pInfo) {
-    const paragraphs = [];
-    let textLength = 0;
+  // Pulls the article out of the container, in reading order: paragraphs,
+  // plus the subheadings and bullet points that sit between them.
+  function extractItems(container, info, inBoilerplate) {
+    const items = [];
 
-    container.querySelectorAll('p').forEach(p => {
-      const { visible, text } = pInfo(p);
-      if (!visible) return;
-      if (text.length > 50 && !/cookie|advert|subscribe|sign up|login/i.test(text)) {
-        const cleaned = p.innerHTML.trim().replace(/<(?!\/?a(?=>|\s.*>))\/?.*?>/gi, ''); // keep only <a>
-        paragraphs.push(cleaned);
-        textLength += text.length;
+    for (const el of container.querySelectorAll('p, h2, h3, h4, li')) {
+      const tag = el.tagName;
+
+      if (tag === 'P') {
+        const { visible, text } = info.get(el) || { visible: false, text: '' };
+        if (!visible || text.length < 20 || inBoilerplate(el)) continue;
+        if (text.length < 200 && linkRatio(el, text.length) >= 0.8) continue; // a link dressed as a paragraph
+        if (text.length < 160 && JUNK_TEXT.test(text)) continue;
+        if (text.length > 50) {
+          items.push({ type: 'p', text, html: cleanHtml(el) });
+        } else if (ENDS_LIKE_SENTENCE.test(text)) {
+          items.push({ type: 'p', short: true, text, html: cleanHtml(el) });
+        }
+        continue;
       }
-    });
 
-    return { paragraphs, textLength };
+      if (!isVisible(el) || inBoilerplate(el)) continue;
+      const text = norm(el.textContent);
+
+      if (tag === 'LI') {
+        if (text.length < 15 || el.querySelector('p, ul, ol')) continue;
+        if (linkRatio(el, text.length) >= 0.5) continue; // menus and related-story lists
+        if (text.length < 160 && JUNK_TEXT.test(text)) continue;
+        items.push({ type: 'li', text, html: cleanHtml(el) });
+      } else {
+        if (text.length < 3 || text.length > 120) continue;
+        if (JUNK_HEADING.test(text) || JUNK_TEXT.test(text)) continue;
+        if (linkRatio(el, text.length) >= 0.8) continue; // a teaser for another story
+        items.push({ type: 'h', text, html: text.replace(/&/g, '&amp;').replace(/</g, '&lt;') });
+      }
+    }
+
+    // The article runs from its first to its last full paragraph. Headings,
+    // bullets and short lines outside that range are page furniture.
+    const isFull = (it) => it.type === 'p' && !it.short;
+    const first = items.findIndex(isFull);
+    if (first === -1) return { items: [], textLength: 0 };
+    let last = items.length - 1;
+    while (!isFull(items[last])) last--;
+    let kept = items.slice(first, last + 1);
+
+    // No repeats, and no heading left without text under it.
+    const seen = new Set();
+    kept = kept.filter((it) => {
+      if (it.type === 'h') return true;
+      if (seen.has(it.text)) return false;
+      seen.add(it.text);
+      return true;
+    });
+    kept = kept.filter((it, i) => it.type !== 'h' || (kept[i + 1] && kept[i + 1].type !== 'h'));
+
+    let textLength = 0;
+    for (const it of kept) if (it.type !== 'h') textLength += it.text.length;
+    return { items: kept.map(({ type, html }) => ({ type, html })), textLength };
   }
 
   function getLikelyTitle() {
@@ -140,7 +245,9 @@
     ['h1', 'h2', 'h3'].forEach(tag => {
       document.querySelectorAll(tag).forEach(el => {
         if (!isVisible(el)) return;
-        const text = el.innerText.trim();
+        // textContent, not innerText: keeps the real capitalisation when the
+        // site shows its headline in forced upper case.
+        const text = norm(el.textContent);
         if (text.length < 5 || text.length > 150) return;
         if (/subscribe|cookie|login|advert/i.test(text)) return;
 
@@ -166,28 +273,34 @@
     if (applied || !document.body) return;
 
     // Single-page apps: a new URL means a new article, so forget the old one.
-    if (best && best.url !== location.href) best = null;
-
-    const pInfo = makeParagraphInfo();
-    const container = findBestContentContainer(pInfo);
-    if (!container) return;
-
-    const { paragraphs, textLength } = extractCleanParagraphsWithLinks(container, pInfo);
-    if (paragraphs.length === 0) return;
-
-    if (!best || textLength > best.textLength) {
-      best = {
-        url: location.href,
-        title: getLikelyTitle() || (best && best.title) || document.title || '',
-        paragraphs,
-        textLength
-      };
+    if (best && best.url !== location.href) {
+      best = null;
+      scanGap = MIN_SCAN_GAP_MS;
     }
+
+    let improved = false;
+    const { container, info, inBoilerplate } = analysePage();
+    if (container) {
+      const { items, textLength } = extractItems(container, info, inBoilerplate);
+      if (items.length > 0 && (!best || textLength > best.textLength)) {
+        best = {
+          url: location.href,
+          title: getLikelyTitle() || (best && best.title) || document.title || '',
+          items,
+          textLength
+        };
+        improved = true;
+      }
+    }
+
+    // Scan less often while nothing new turns up, so busy pages (tickers,
+    // rotating ads) don't keep the extension working for no benefit.
+    scanGap = improved ? MIN_SCAN_GAP_MS : Math.min(scanGap * 2, MAX_SCAN_GAP_MS);
   }
 
   function scheduleScan() {
     if (applied || pendingScan) return;
-    const wait = Math.max(0, lastScan + MIN_SCAN_GAP_MS - Date.now());
+    const wait = Math.max(0, lastScan + scanGap - Date.now());
     pendingScan = setTimeout(() => {
       pendingScan = null;
       scan();
@@ -282,7 +395,16 @@
           margin: 0 auto !important;
           padding: 100px !important;
         }
-        #x344q p { display: block !important; margin: 5px !important; padding: 10px !important; }`;
+        #x344q p { display: block !important; margin: 5px !important; padding: 10px !important; }
+        #x344q h2 {
+          display: block !important;
+          font-size: ${Math.round(size.px * 1.15)}px !important;
+          font-weight: bold !important;
+          margin: 20px 5px 0 !important;
+          padding: 10px !important;
+        }
+        #x344q ul { display: block !important; list-style: disc outside !important; margin: 5px !important; padding: 0 10px 0 40px !important; }
+        #x344q li { display: list-item !important; margin: 0 !important; padding: 4px 0 !important; }`;
       (document.head || document.documentElement).appendChild(style);
     }
   }
@@ -355,9 +477,18 @@
 
     const content = document.createElement('div');
     content.id = 'x344q';
-    content.innerHTML = best.paragraphs
-      .map(p => `<p>${p}</p>`)
-      .join('');
+    // Paragraphs, subheadings and bullet points, in reading order.
+    let html = '';
+    let inList = false;
+    for (const it of best.items) {
+      if ((it.type === 'li') !== inList) {
+        html += inList ? '</ul>' : '<ul>';
+        inList = !inList;
+      }
+      html += it.type === 'h' ? `<h2>${it.html}</h2>` : it.type === 'li' ? `<li>${it.html}</li>` : `<p>${it.html}</p>`;
+    }
+    if (inList) html += '</ul>';
+    content.innerHTML = html;
     // Links keep only their destination; site classes and inline styles go.
     for (const a of content.querySelectorAll('a')) {
       const href = a.getAttribute('href');
