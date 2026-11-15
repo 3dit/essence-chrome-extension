@@ -14,7 +14,7 @@ chrome.action.onClicked.addListener(async (tab) => {
     try {
       await chrome.scripting.executeScript({
         target: { tabId: tab.id, allFrames: false },
-        files: ['essence.js']
+        files: ['themes.js', 'essence.js']
       });
       await chrome.tabs.sendMessage(tab.id, APPLY);
     } catch (err) {

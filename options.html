@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Essence Extractor settings</title>
+  <style>
+    body {
+      font: 14px/1.4 system-ui, sans-serif;
+      margin: 0;
+      padding: 16px 20px 20px;
+      min-width: 420px;
+      color: #222;
+      background: #fff;
+    }
+    h1 { font-size: 16px; margin: 0 0 4px; }
+    p.hint { margin: 0 0 14px; color: #666; }
+    h1.next { margin-top: 20px; }
+    .sample { padding: 12px; font-size: 15px; line-height: 1.35; background: #fafafa; color: #222; }
+    #themes, #fonts, #sizes { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; }
+    label.theme {
+      display: block;
+      border: 2px solid #ccc;
+      border-radius: 8px;
+      overflow: hidden;
+      cursor: pointer;
+    }
+    label.theme:has(input:checked) { border-color: #0b57d0; box-shadow: 0 0 0 2px #0b57d033; }
+    label.theme:has(input:focus-visible) { outline: 2px solid #0b57d0; outline-offset: 2px; }
+    .preview { padding: 12px; font-size: 12px; line-height: 1.35; }
+    .preview b { display: block; font-size: 13px; margin-bottom: 4px; }
+    .preview u { text-decoration: underline; }
+    .pick { display: flex; align-items: center; gap: 6px; padding: 6px 10px; background: #f3f3f3; color: #222; }
+    #status { margin-top: 12px; height: 1.4em; color: #188038; }
+    @media (prefers-color-scheme: dark) {
+      body { background: #202124; color: #e8eaed; }
+      p.hint { color: #9aa0a6; }
+      label.theme { border-color: #5f6368; }
+      label.theme:has(input:checked) { border-color: #8ab4f8; box-shadow: 0 0 0 2px #8ab4f833; }
+      .pick { background: #2d2e31; color: #e8eaed; }
+      #status { color: #81c995; }
+    }
+  </style>
+</head>
+<body>
+  <h1>Theme</h1>
+  <p class="hint">Choose how articles look after you click the E button. Changes apply right away, including to pages already open.</p>
+  <div id="themes" role="radiogroup" aria-label="Theme"></div>
+  <h1 class="next">Font</h1>
+  <p class="hint">The font used for article text. The page's original font is never used.</p>
+  <div id="fonts" class="grid" role="radiogroup" aria-label="Font"></div>
+  <h1 class="next">Text size</h1>
+  <p class="hint">The size of article text. The title is slightly larger.</p>
+  <div id="sizes" role="radiogroup" aria-label="Text size"></div>
+  <div id="status" role="status"></div>
+  <script src="themes.js"></script>
+  <script src="options.js"></script>
+</body>
+</html>

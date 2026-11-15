@@ -17,6 +17,50 @@
   let lastScan = 0;
   let pendingScan = null;
 
+  // ---------- theme (chosen on the extension's settings page) ----------
+
+  const THEMES = globalThis.ESSENCE_THEMES || {
+    black: { name: 'Black', bg: '#000000', text: '#ffffff', link: '#eeee22' }
+  };
+  const DEFAULT_THEME = THEMES[globalThis.ESSENCE_DEFAULT_THEME] ? globalThis.ESSENCE_DEFAULT_THEME : Object.keys(THEMES)[0];
+  let theme = THEMES[DEFAULT_THEME];
+
+  // Fonts are always our own; the page's original font is never used.
+  const FONTS = globalThis.ESSENCE_FONTS || {
+    sans: { name: 'Sans-serif', stack: '"Segoe UI", "Helvetica Neue", Arial, sans-serif' }
+  };
+  const DEFAULT_FONT = FONTS[globalThis.ESSENCE_DEFAULT_FONT] ? globalThis.ESSENCE_DEFAULT_FONT : Object.keys(FONTS)[0];
+  let font = FONTS[DEFAULT_FONT];
+
+  // Text size is always our own too, not the page's.
+  const SIZES = globalThis.ESSENCE_SIZES || { medium: { name: 'Medium', px: 16 } };
+  const DEFAULT_SIZE = SIZES[globalThis.ESSENCE_DEFAULT_SIZE] ? globalThis.ESSENCE_DEFAULT_SIZE : Object.keys(SIZES)[0];
+  let size = SIZES[DEFAULT_SIZE];
+
+  function setLook(themeId, fontId, sizeId) {
+    if (themeId !== undefined) theme = THEMES[themeId] || THEMES[DEFAULT_THEME];
+    if (fontId !== undefined) font = FONTS[fontId] || FONTS[DEFAULT_FONT];
+    if (sizeId !== undefined) size = SIZES[sizeId] || SIZES[DEFAULT_SIZE];
+    // If the reader view is already showing, restyle it.
+    const style = document.getElementById('x344q-style');
+    if (style) {
+      style.remove();
+      unlockScrollingAndStyle();
+    }
+  }
+
+  if (globalThis.chrome && chrome.storage && chrome.storage.sync) {
+    chrome.storage.sync.get({ theme: DEFAULT_THEME, font: DEFAULT_FONT, size: DEFAULT_SIZE }, (stored) => {
+      if (!chrome.runtime.lastError && stored) setLook(stored.theme, stored.font, stored.size);
+    });
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area !== 'sync') return;
+      if (changes.theme) setLook(changes.theme.newValue, undefined);
+      if (changes.font) setLook(undefined, changes.font.newValue);
+      if (changes.size) setLook(undefined, undefined, changes.size.newValue);
+    });
+  }
+
   // ---------- content detection ----------
 
   function isVisible(el) {
@@ -178,29 +222,120 @@
     if (!document.getElementById('x344q-style')) {
       const style = document.createElement('style');
       style.id = 'x344q-style';
+      // The site's own stylesheets are removed (see removeSiteStyles), so
+      // these rules are the only thing deciding how the page looks. That is
+      // what makes every site render identically.
       style.textContent = `
         html, body {
+          display: block !important;
+          margin: 0 !important;
+          padding: 0 !important;
           overflow: auto !important;
           overflow-y: auto !important;
           position: static !important;
+          width: auto !important;
           height: auto !important;
           max-height: none !important;
           touch-action: auto !important;
         }
-        body { background: black !important; }
-        body, body p, body h1, body div { color: white !important; }
-        body a { color: #eeee22 !important; }
+        /* Hide anything the site adds next to our content (popups, overlays, ads). */
+        body > :not(#x344q):not(#x344q-title),
+        html > :not(head):not(body) {
+          display: none !important;
+        }
+        body { background: ${theme.bg} !important; }
+        body, body * {
+          box-sizing: border-box !important;
+          color: ${theme.text} !important;
+          font-family: ${font.stack} !important;
+          font-style: normal !important;
+          font-weight: normal !important;
+          letter-spacing: normal !important;
+          word-spacing: normal !important;
+          text-transform: none !important;
+          text-align: left !important;
+          text-indent: 0 !important;
+        }
+        body a { color: ${theme.link} !important; text-decoration: underline !important; }
+        #x344q, #x344q * { font-size: ${size.px}px !important; line-height: 1.5 !important; }
+        #x344q-title {
+          display: flex !important;
+          justify-content: center !important;
+          align-items: center !important;
+          margin: 0 !important;
+          padding: 0 !important;
+        }
+        #x344q-title h1 {
+          font-size: ${Math.round(size.px * 1.25)}px !important;
+          line-height: 1.3 !important;
+          font-weight: bold !important;
+          text-align: center !important;
+          margin: 0 !important;
+          padding: 20px !important;
+        }
         #x344q {
-          width: 55em;
-          display: flex;
-          flex-direction: column;
-          justify-content: space-around;
-          margin-left: auto;
-          margin-right: auto;
-          padding: 100px;
-        }`;
+          width: 55em !important;
+          max-width: 100% !important;
+          display: flex !important;
+          flex-direction: column !important;
+          justify-content: space-around !important;
+          margin: 0 auto !important;
+          padding: 100px !important;
+        }
+        #x344q p { display: block !important; margin: 5px !important; padding: 10px !important; }`;
       (document.head || document.documentElement).appendChild(style);
     }
+  }
+
+  // The site's scripts keep running after we replace the page, and can still
+  // add popups, overlays and ads, or re-lock scrolling. Once applied, the page
+  // is ours: remove anything added beside our content and undo class/style
+  // changes on <html>/<body>. (Removal, not just hiding, because a modal
+  // <dialog> makes the rest of the page unclickable even when hidden.)
+  // Remove the site's CSS so it can't affect the reader view. Without this the
+  // same article text looks different from site to site (spacing, margins,
+  // underlines, box sizing and so on leak through).
+  function removeSiteStyles() {
+    for (const el of document.querySelectorAll('style, link[rel~="stylesheet"]')) {
+      if (el.id !== 'x344q-style') el.remove();
+    }
+    try {
+      if (document.adoptedStyleSheets && document.adoptedStyleSheets.length) {
+        document.adoptedStyleSheets = [];
+      }
+    } catch { /* not supported or not allowed: nothing to do */ }
+  }
+
+  function guardPage() {
+    const isOurs = (el) =>
+      el.id === 'x344q' || el.id === 'x344q-title';
+
+    const clean = () => {
+      const html = document.documentElement;
+      const body = document.body;
+      if (!body) return;
+
+      for (const el of [...body.children]) {
+        if (!isOurs(el)) el.remove();
+      }
+      for (const el of [...html.children]) {
+        if (el !== body && el !== document.head) el.remove();
+      }
+      for (const el of [html, body]) {
+        if (el.hasAttribute('class')) el.removeAttribute('class');
+        if (el.hasAttribute('style')) el.removeAttribute('style');
+      }
+      removeSiteStyles();
+      // Our stylesheet must survive, even if the site rewrites <head>.
+      if (!document.getElementById('x344q-style')) unlockScrollingAndStyle();
+    };
+
+    clean();
+    const guard = new MutationObserver(clean);
+    const opts = { childList: true, attributes: true, attributeFilter: ['class', 'style'] };
+    guard.observe(document.documentElement, opts);
+    guard.observe(document.body, opts);
+    if (document.head) guard.observe(document.head, { childList: true });
   }
 
   function apply() {
@@ -213,20 +348,26 @@
     stopScanning();
 
     const titleWrap = document.createElement('div');
-    titleWrap.style.cssText = 'display:flex;justify-content:center;align-items:center;';
+    titleWrap.id = 'x344q-title';
     const h1 = document.createElement('h1');
-    h1.style.cssText = 'font-weight:bold;font-size:20px;padding:20px;';
     h1.textContent = best.title || document.title || '';
     titleWrap.appendChild(h1);
 
     const content = document.createElement('div');
     content.id = 'x344q';
     content.innerHTML = best.paragraphs
-      .map(p => `<p style="padding:10px;margin:5px;">${p}</p>`)
+      .map(p => `<p>${p}</p>`)
       .join('');
+    // Links keep only their destination; site classes and inline styles go.
+    for (const a of content.querySelectorAll('a')) {
+      const href = a.getAttribute('href');
+      for (const attr of [...a.attributes]) a.removeAttribute(attr.name);
+      if (href) a.setAttribute('href', href);
+    }
 
     document.body.replaceChildren(titleWrap, content);
     unlockScrollingAndStyle();
+    guardPage();
     window.scrollTo(0, 0);
     return true;
   }

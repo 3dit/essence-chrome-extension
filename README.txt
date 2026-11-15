@@ -35,6 +35,18 @@ still uses the fullest version it saw. Pages are only changed when you
 click "E". Refresh the page to get the original back.
 
 
+THEMES AND FONTS
+----------------
+To change the look, right-click the "E" button and choose "Options".
+
+- Theme: Black, Dim, Sepia, Gray or Light.
+- Font: Sans-serif, Serif (Georgia), Times, Verdana or Monospace. The
+  website's own font is never used.
+- Text size: Small, Medium, Large, Extra large or Huge.
+
+Changes apply right away, including to articles you already have open.
+
+
 NOTES
 -----
 - When Chrome starts, it may show a warning about "developer mode
