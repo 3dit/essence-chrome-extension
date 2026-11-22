@@ -404,7 +404,12 @@
           padding: 10px !important;
         }
         #x344q ul { display: block !important; list-style: disc outside !important; margin: 5px !important; padding: 0 10px 0 40px !important; }
-        #x344q li { display: list-item !important; margin: 0 !important; padding: 4px 0 !important; }`;
+        #x344q li { display: list-item !important; margin: 0 !important; padding: 4px 0 !important; }
+        /* Phones and narrow windows: the wide margins would leave no room for text. */
+        @media (max-width: 700px) {
+          #x344q { padding: 12px !important; }
+          #x344q-title h1 { padding: 16px 22px !important; }
+        }`;
       (document.head || document.documentElement).appendChild(style);
     }
   }
@@ -426,6 +431,19 @@
         document.adoptedStyleSheets = [];
       }
     } catch { /* not supported or not allowed: nothing to do */ }
+  }
+
+  // On phones, a page with no viewport setting (or a fixed-width one) is laid
+  // out at desktop width and shrunk to fit, which makes the text tiny. The
+  // reader view fits any width, so always ask for the device's own width.
+  // Desktop browsers ignore this.
+  function setMobileViewport() {
+    if (!document.head) return;
+    for (const el of document.querySelectorAll('meta[name="viewport" i]')) el.remove();
+    const meta = document.createElement('meta');
+    meta.name = 'viewport';
+    meta.content = 'width=device-width, initial-scale=1';
+    document.head.appendChild(meta);
   }
 
   function guardPage() {
@@ -497,6 +515,7 @@
     }
 
     document.body.replaceChildren(titleWrap, content);
+    setMobileViewport();
     unlockScrollingAndStyle();
     guardPage();
     window.scrollTo(0, 0);

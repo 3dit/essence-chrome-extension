@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Essence Extractor settings</title>
   <style>
     body {
@@ -31,6 +32,10 @@
     .preview u { text-decoration: underline; }
     .pick { display: flex; align-items: center; gap: 6px; padding: 6px 10px; background: #f3f3f3; color: #222; }
     #status { margin-top: 12px; height: 1.4em; color: #188038; }
+    /* Phones: fit the screen instead of forcing the desktop dialog width. */
+    @media (pointer: coarse) {
+      body { min-width: 0; }
+    }
     @media (prefers-color-scheme: dark) {
       body { background: #202124; color: #e8eaed; }
       p.hint { color: #9aa0a6; }
