@@ -97,20 +97,61 @@
     return el.innerHTML.trim().replace(/<(?!\/?a(?=>|\s.*>))\/?.*?>/gi, '');
   }
 
+  // Some sites (Reuters, for one) put each paragraph in a <div> rather than a
+  // <p>. A <div> is such a paragraph when it holds running text directly:
+  // a good amount of text of its own, and nothing inside but inline elements.
+  const INLINE_TAGS = new Set(['A', 'SPAN', 'EM', 'STRONG', 'B', 'I', 'U', 'BR', 'WBR', 'SUP', 'SUB', 'MARK',
+    'SMALL', 'ABBR', 'CITE', 'Q', 'CODE', 'TIME', 'S', 'INS', 'DEL']);
+  const MIN_DIV_PARAGRAPH = 60;
+
+  function isDivParagraph(div) {
+    let own = 0;
+    for (const n of div.childNodes) {
+      if (n.nodeType === 3) own += n.nodeValue.trim().length;
+      else if (n.nodeType === 1 && !INLINE_TAGS.has(n.tagName)) return false;
+    }
+    return own >= MIN_DIV_PARAGRAPH;
+  }
+
   // Looks at every paragraph once and works out, for each element on the page,
-  // how much article-like text it holds. Returns the best container and a
-  // function saying whether an element sits in a boilerplate region.
+  // how much article-like text it holds. Returns the best container, a
+  // function saying whether an element sits in a boilerplate region, and the
+  // <div>s that count as paragraphs on this page (usually none).
   function analysePage() {
     const body = document.body;
-    const info = new Map();          // p -> { visible, text }
+    const info = new Map();          // paragraph -> { visible, text }
     const rawLen = new Map();        // element -> text length of all visible paragraphs inside
     let total = 0;
 
-    const ps = body.querySelectorAll('p');
+    // Records each element's visible text; returns how much of it is paragraph-sized.
+    const measure = (els) => {
+      let sum = 0;
+      for (const el of els) {
+        const visible = isVisible(el);
+        const text = visible ? norm(el.innerText) : '';
+        info.set(el, { visible, text });
+        if (text.length > 30) sum += text.length;
+      }
+      return sum;
+    };
+
+    let ps = [...body.querySelectorAll('p')];
+    const pTotal = measure(ps);
+
+    // <div> paragraphs are only used where they carry more of the page's text
+    // than its <p>s do, so sites that mark up paragraphs properly are unaffected.
+    const divParagraphs = new Set();
+    const divs = [];
+    for (const div of body.querySelectorAll('div')) {
+      if (div.firstChild && !div.closest('a') && isDivParagraph(div)) divs.push(div);
+    }
+    if (divs.length >= 3 && measure(divs) > pTotal) {
+      for (const div of divs) divParagraphs.add(div);
+      ps = ps.concat(divs);
+    }
+
     for (const p of ps) {
-      const visible = isVisible(p);
-      const text = visible ? norm(p.innerText) : '';
-      info.set(p, { visible, text });
+      const { text } = info.get(p);
       if (text.length > 30) {
         total += text.length;
         for (let e = p.parentElement; e && e !== body; e = e.parentElement) {
@@ -121,15 +162,19 @@
 
     // An element is boilerplate by tag/role, or by name unless it holds a
     // large share of the page's text (e.g. an article wrapper that happens
-    // to be called "article-with-sidebar").
+    // to be called "article-with-sidebar"). A <figure> gets the same
+    // allowance: it is normally a picture and its caption, but some sites
+    // wrap a whole list-style article in one.
     const boilerCache = new Map();
     const isBoilerplateEl = (e) => {
       let v = boilerCache.get(e);
       if (v === undefined) {
         const role = e.getAttribute('role') || '';
         const name = (typeof e.className === 'string' ? e.className : '') + ' ' + e.id;
-        v = BOILERPLATE_TAGS.has(e.tagName) || BOILERPLATE_ROLES.test(role) ||
-          (BOILERPLATE_NAMES.test(name) && (rawLen.get(e) || 0) < total * 0.4);
+        const holdsArticle = (rawLen.get(e) || 0) >= total * 0.4;
+        v = e.tagName === 'FIGURE' ? !holdsArticle :
+          BOILERPLATE_TAGS.has(e.tagName) || BOILERPLATE_ROLES.test(role) ||
+          (BOILERPLATE_NAMES.test(name) && !holdsArticle);
         boilerCache.set(e, v);
       }
       return v;
@@ -175,18 +220,47 @@
       }
     }
 
-    return { container: bestEl, info, inBoilerplate };
+    if (!bestEl) bestEl = shortArticleContainer(goodCount);
+
+    return { container: bestEl, info, inBoilerplate, divParagraphs };
+  }
+
+  // A story of only one or two paragraphs (a brief, or the opening that a
+  // paywall leaves on the page) has too little text to stand out the usual
+  // way. It is still an article if the page is laid out as one: its own
+  // headline in an <h1>, with the text in the same <article> or <main>.
+  // Front pages must not qualify; they are shown as headlines instead.
+  function shortArticleContainer(goodCount) {
+    if (location.pathname === '/') return null;
+    const ogType = document.querySelector('meta[property="og:type"]');
+    if (ogType && !/article/i.test(ogType.content || '')) return null;
+
+    for (const h1 of document.body.querySelectorAll('h1')) {
+      if (!isVisible(h1) || !looksLikeHeadline(norm(h1.textContent))) continue;
+      if (h1.querySelector('a[href]') || h1.closest('a[href]')) continue; // a teaser for another page
+      const el = h1.closest('article, main, [role="main"]');
+      if (!el || !goodCount.get(el)) continue;
+      // Several headline links around the text: a section page with an intro.
+      let headlines = 0;
+      for (const a of el.querySelectorAll('a[href]')) {
+        if (!a.closest('p') && looksLikeHeadline(norm(a.textContent))) headlines++;
+      }
+      if (headlines < MIN_HEADLINES) return el;
+    }
+    return null;
   }
 
   // Pulls the article out of the container, in reading order: paragraphs,
   // plus the subheadings and bullet points that sit between them.
-  function extractItems(container, info, inBoilerplate) {
+  function extractItems(container, info, inBoilerplate, divParagraphs) {
     const items = [];
+    const selector = divParagraphs.size ? 'p, h2, h3, h4, li, div' : 'p, h2, h3, h4, li';
 
-    for (const el of container.querySelectorAll('p, h2, h3, h4, li')) {
+    for (const el of container.querySelectorAll(selector)) {
       const tag = el.tagName;
+      if (tag === 'DIV' && !divParagraphs.has(el)) continue;
 
-      if (tag === 'P') {
+      if (tag === 'P' || tag === 'DIV') {
         const { visible, text } = info.get(el) || { visible: false, text: '' };
         if (!visible || text.length < 20 || inBoilerplate(el)) continue;
         if (text.length < 200 && linkRatio(el, text.length) >= 0.8) continue; // a link dressed as a paragraph
@@ -266,6 +340,133 @@
     return candidates.length > 0 ? candidates[0].text : null;
   }
 
+  // ---------- front pages ----------
+
+  // Front pages and section indexes have no article, only headlines that link
+  // to articles. When no article is found, the reader view shows those
+  // headlines as a list of links, under the page's own section names.
+
+  const MIN_HEADLINES = 5;
+  const INDEX_SKIP_TAGS = new Set(['NAV', 'FOOTER', 'FORM', 'BUTTON', 'DIALOG']);
+  const INDEX_SKIP_NAMES = /(^|[^a-z])(cookie|cookies|consent|newsletters?|subscribe|signup|footer|comments?)([^a-z]|$)/i;
+  const INDEX_JUNK = /subscribe|sign up|newsletter|log ?in\b|advertis/i;
+  const CJK = /[぀-ヿ㐀-鿿가-힯]/;
+
+  const escapeHtml = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+  // Long enough to be a headline rather than a section name or a menu entry.
+  function looksLikeHeadline(text) {
+    if (text.length > 300) return false;
+    if (CJK.test(text)) return text.length >= 8;
+    return text.length >= 25 || text.split(' ').length >= 4;
+  }
+
+  function inSiteChrome(el) {
+    for (let e = el; e && e !== document.body; e = e.parentElement) {
+      const name = (typeof e.className === 'string' ? e.className : '') + ' ' + e.id;
+      if (INDEX_SKIP_TAGS.has(e.tagName) || BOILERPLATE_ROLES.test(e.getAttribute('role') || '') || INDEX_SKIP_NAMES.test(name)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // Where a link goes, if it leads to another page.
+  function linkTarget(a) {
+    if (!a || !/^https?:$/.test(a.protocol)) return null;
+    const here = location.href.split('#')[0];
+    return a.href.split('#')[0] === here ? null : a.href;
+  }
+
+  function extractHeadlines() {
+    const seen = new Set();
+    let title = null;
+    let count = 0;
+    let items = [];
+
+    const addHeadline = (el, text, href) => {
+      if (seen.has(href) || seen.has(text) || INDEX_JUNK.test(text)) return;
+      seen.add(href);
+      seen.add(text);
+      items.push({ type: 'li', el, html: `<a href="${escapeHtml(href)}">${escapeHtml(text)}</a>` });
+      count++;
+    };
+
+    // A section name sits just above its headlines, so they share a nearby
+    // ancestor. A short heading elsewhere (a video player's caption, say)
+    // must not end up as the title of whatever headlines happen to follow.
+    const headsSection = (h, next) => {
+      let scope = h.el;
+      for (let i = 0; i < 3 && scope.parentElement && scope.parentElement !== document.body; i++) {
+        scope = scope.parentElement;
+      }
+      return !!next && next.type !== 'h' && scope.contains(next.el);
+    };
+
+    // Most sites mark headlines up as headings.
+    for (const el of document.body.querySelectorAll('h1, h2, h3, h4, h5, h6')) {
+      const text = norm(el.textContent);
+      if (text.length < 2 || !isVisible(el) || inSiteChrome(el)) continue;
+      const href = linkTarget(el.querySelector('a[href]') || el.closest('a[href]'));
+      if (href && looksLikeHeadline(text)) {
+        addHeadline(el, text, href);
+      } else if (text.length <= 40) {
+        // A short heading is the site's name (the first <h1>) or a section name.
+        if (el.tagName === 'H1' && title === null) title = text;
+        else items.push({ type: 'h', el, html: escapeHtml(text) });
+      }
+    }
+
+    // Others use plain links.
+    if (count < MIN_HEADLINES) {
+      for (const a of document.body.querySelectorAll('a[href]')) {
+        const text = norm(a.textContent);
+        const href = linkTarget(a);
+        if (!href || !looksLikeHeadline(text) || a.closest('h1, h2, h3, h4, h5, h6')) continue;
+        if (!isVisible(a) || inSiteChrome(a)) continue;
+        addHeadline(a, text, href);
+      }
+      // These were not gathered in page order, so the section names no longer fit.
+      items = items.filter((it) => it.type !== 'h');
+    }
+    if (count < MIN_HEADLINES) return null;
+
+    // No section name left without headlines under it.
+    items = items.filter((it, i) => it.type !== 'h' || headsSection(it, items[i + 1]));
+    return {
+      url: location.href,
+      title: title || document.title || '',
+      items: items.map(({ type, html }) => ({ type, html })),
+      textLength: 0
+    };
+  }
+
+  // Briefly tells the user why clicking "E" changed nothing.
+  function notify(text) {
+    const old = document.getElementById('x344q-note');
+    if (old) old.remove();
+    const note = document.createElement('div');
+    note.id = 'x344q-note';
+    note.setAttribute('role', 'status');
+    note.textContent = text;
+    note.style.cssText = `
+      all: initial !important;
+      position: fixed !important;
+      z-index: 2147483647 !important;
+      top: 16px !important;
+      right: 16px !important;
+      max-width: calc(100vw - 32px) !important;
+      box-sizing: border-box !important;
+      padding: 10px 14px !important;
+      border: 1px solid #ffffff !important;
+      border-radius: 6px !important;
+      background: #000000 !important;
+      color: #ffffff !important;
+      font: 14px/1.4 "Segoe UI", "Helvetica Neue", Arial, sans-serif !important;`;
+    document.documentElement.appendChild(note);
+    setTimeout(() => note.remove(), 4000);
+  }
+
   // ---------- continuous scanning ----------
 
   function scan() {
@@ -279,9 +480,9 @@
     }
 
     let improved = false;
-    const { container, info, inBoilerplate } = analysePage();
+    const { container, info, inBoilerplate, divParagraphs } = analysePage();
     if (container) {
-      const { items, textLength } = extractItems(container, info, inBoilerplate);
+      const { items, textLength } = extractItems(container, info, inBoilerplate, divParagraphs);
       if (items.length > 0 && (!best || textLength > best.textLength)) {
         best = {
           url: location.href,
@@ -482,7 +683,11 @@
     if (applied) return true;
 
     scan(); // one last look, in case something arrived since the last scan
-    if (!best) return false;
+    if (!best && document.body) best = extractHeadlines(); // not an article: a front page?
+    if (!best) {
+      notify('Essence: no article or headlines found on this page.');
+      return false;
+    }
 
     applied = true;
     stopScanning();

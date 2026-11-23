@@ -57,8 +57,10 @@ NOTES
   article text as pages load. Nothing is sent anywhere; it all stays in
   your browser.
 
-- It works best on news and blog articles. On pages without a clear block
-  of article text, clicking "E" does nothing.
+- It works best on news and blog articles. On a front page or section
+  page, which has headlines rather than an article, clicking "E" shows
+  the headlines as a list of links. If a page has neither, a short
+  message appears in the corner and the page is left as it is.
 
 - It doesn't work on Chrome's own pages (chrome://...) or the Chrome Web
   Store.
